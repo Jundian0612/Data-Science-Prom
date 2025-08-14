@@ -1,0 +1,17 @@
+---
+title: "Data Science Prom"
+author: "Jundian"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(readr)
+df_108 <- read_csv("moi_people_house_dtl_simulation_108.csv")
+View(df_108)
+df_109 <- read_csv("moi_people_house_dtl_simulation_109.csv")
+df_110 <- read_csv("moi_people_house_dtl_simulation_110.csv")
+df_111 <- read_csv("moi_people_house_dtl_simulation_111.csv")
+df_112 <- read_csv("moi_people_house_dtl_simulation_112.csv")
+```
+

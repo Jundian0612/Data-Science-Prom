@@ -1,1 +1,199 @@
-#fff
+20250819 JAM
+# 安裝必要套件
+install.packages("data.table")
+install.packages("FactoMineR")
+install.packages("factoextra")
+install.packages("dplyr")
+install.packages("lubridate")  
+install.packages("missMDA")
+install.packages("pROC")
+
+# 載入套件
+library(data.table)
+library(FactoMineR)
+library(factoextra)
+library(dplyr)
+library(lubridate)
+library(missMDA) #自動補缺值
+library(ggplot2)
+library(pROC)
+library(ggsci)
+library(scales)
+library(ggrepel)
+
+
+# 匯入資料
+data <- fread("D:/DataScienceWalk/112peoplebulidinggeoData/112moi_people_house_dtl_simulation.csv")
+
+
+
+# 轉換 birthday_date → age（以 2025 年 1 月 1 日為基準）
+# 假設 birthday_date 是日期格式或可轉換為 "yyyy-mm-dd"
+data$birthday_date <- as.Date(data$birthday_date)
+data$movein_date <- as.Date(data$movein_date)
+data$first_child_birthday <- as.Date(data$first_child_birthday)
+
+ref_date <- as.Date("2024-01-01")
+data$age <- floor(interval(data$birthday_date, ref_date) / years(1))
+data$movein_date <- floor(interval(data$movein_date, ref_date) / years(1))
+data$first_child_birthday <- floor(interval(data$first_child_birthday, ref_date) / years(1))
+
+#-----------------------呼叫資料與修正資料--------------------------------------
+# 建立 13 個解釋變數（含 age）
+pca_data <- data %>%
+  select(age, move_cnt, movein_date, first_child_birthday, first_own_house_year, 
+         child_cnt, b_area,is_in_active_fault)
+
+
+#偵測是否有空字串
+pca_empty<- sapply(pca_data, function(x) sum(as.character(x)=="", na.rm = TRUE))#都顯示0，代表沒有空字串
+pca_empty
+
+#偵測是否有NA
+pca_NA <- sapply(pca_data, function(x) sum(is.na(x))) %>% .[. > 0] # first_child_birthday 918966 
+                                                                   #first_own_house_year 1528820           
+                                                                   #child_cnt 35079               
+                                                                   #b_area 239532
+pca_NA
+
+# === 將空字串轉 NA（若有）===
+#pca_data <- pca_data %>% mutate(across(where(is.character), ~na_if(.x, "")))
+
+# 移除完全是 NA 的欄位
+pca_data <- na.omit(pca_data)
+pca_NA <- sapply(pca_data, function(x) sum(is.na(x))) %>% .[. > 0] # 偵測第二次，已經沒有NA
+pca_NA
+
+pca_data <- pca_data %>% filter(if_all(where(is.numeric), ~ . >= 0)) #保留大於等於0的值
+pca_data
+
+pca_data <- pca_data[pca_data$is_in_active_fault != 2, ] #保留那些斷層帶不為2，也就是不保留Null
+
+pca_data_13 <- pca_data[,1:7] #刪掉斷層帶的資料
+
+nrow(pca_data_13) #famd_data_13 資料筆數
+
+#-----------------------PCA------------------------------------------------------------
+
+pca_result <- PCA(pca_data_13, graph = FALSE)
+get_eig(pca_result) #主成分解釋的變異量
+pca_result$var$contrib #變數在各主成分上的貢獻
+pca_result$var$coord #各主成分的變數座標
+pca_result$ind$coord #個體（觀測值）在主成分空間的投影
+head(pca_result$ind$coord) #原始資料被投影到前幾主成分的結果
+
+nrow(pca_result$eig) #只有7個主成分
+
+
+#-----------------------繪圖-------------------------------------------------
+
+#直方圖
+
+# 顯示結果
+eig_df <- as.data.frame(get_eig(pca_result))  
+eig_df$PC <- paste0("PC", seq_len(nrow(eig_df)))  # 可以加上 PC 標籤了
+eig_df_clean <- eig_df[!is.na(eig_df$variance.percent), ] #刪掉NA
+
+ggplot(eig_df_clean, aes(x = PC, y = variance.percent)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  geom_line(aes(group = 1), color = "black") +
+  geom_point(color = "black") +
+  geom_text(aes(label = paste0(round(variance.percent, 1), "%")),
+            vjust = -0.5, size = 4) +
+  labs(title = "Scree Plot",
+       x = "主成分",
+       y = "解釋變異百分比") +
+  theme_minimal()
+
+
+
+
+#繪製貢獻度的圖
+pca_coords <- pca_result$ind$coord
+
+for (i in 1:ncol(pca_coords) ) {
+  p <- fviz_contrib(pca_result, choice = "var", axes = i, top = ncol(pca_data_13)) +
+    labs(title = paste("PC", i, "貢獻度圖")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))  # 旋轉 X 軸文字
+  print(p)
+}  #ncol(pca_data_13) = 5  ncol(pca_data_13) = 7
+
+#---------------------------主成分線性組合---------------------------------------------
+
+# 列出每一個主成分的線性組合
+
+var_names <- rownames(pca_result$var$coord) # 抓變數名稱
+
+# 建立一個空的 data.frame 來存結果
+linear_comb_df <- data.frame(
+  PC = paste0("PC", 1:ncol(pca_coords)),
+  Linear_Combination = character(ncol(pca_coords)),
+  stringsAsFactors = FALSE
+)
+# 依序列出每一個主成分的線性組合
+for (pc_num in 1:ncol(pca_coords)) {
+  pc_loading <- pca_result$var$coord[, pc_num]
+  
+  terms <- sapply(1:length(pc_loading), function(i) {
+    coef <- round(pc_loading[i], 3)
+    sign <- ifelse(coef >= 0, "+", "-")
+    paste0(" ", sign, " ", abs(coef), " * ", var_names[i])
+  })                                                           # 組合每個項目為字串
+  
+  expression <- paste(terms, collapse = " ")
+  expression <- sub("^\\+ ", "", expression)       #移除第一個 "+" 的前綴
+
+  cat("Linear Combination of PC", pc_num, ":\n", paste(terms, collapse = ""), "\n\n") # 合併輸出
+
+
+linear_comb_df$Linear_Combination[pc_num] <- expression    # 存入表格
+}
+
+
+linear_comb_df # 顯示表格
+  
+#---------------------------Logistics Regressstion------------------------------------------------------
+
+# 前 4 個主成分作為新的解釋變數 X
+X_pcs <- pca_result$ind$coord[, 1:4] #cumulative.variance.percent = 82.91643
+X_df <- as.data.table(X_pcs)
+
+# 對應 famd_data_13 的列數 → 從famd_dat中同步抓出對應 Y
+X_df$is_in_active_fault <- pca_data$is_in_active_fault[as.numeric(rownames(X_df))]
+
+# 加入 Y(斷層帶 is_in_active_fault)
+X_df$is_in_active_fault <- pca_data$is_in_active_fault
+
+
+
+# 建立邏輯斯回歸模型
+logit_model <- glm(is_in_active_fault ~ ., 
+                   data = X_df,
+                   family = binomial())
+
+# 查看模型摘要
+summary(logit_model)  #顯著水準為0.05 ,只有Dim1、Dim3有足夠證據解釋這兩種主成分可能影響居住選擇住在斷層帶
+
+
+# 取得預測機率
+X_df$predicted_prob <- predict(logit_model, type = "response")
+
+# 預測分類（門檻設為 0.5）
+X_df$predicted_class <- ifelse(X_df$predicted_prob > 0.5, 1, 0)
+
+# 混淆矩陣
+table(預測 = X_df$predicted_class, 真實 = X_df$is_in_active_fault) #混淆矩陣顯示模型多數預測為「沒住」，代表模型對稀有事件（住在斷層帶）預測力不足
+
+#繪製 pROC 曲線
+#當AUC = 1時，代表分類器非常完美，但這畢竟是理想狀況。
+#當AUC > 0.5時，代表分類器分類效果優於隨機猜測，模型有預測價值。
+#當AUC = 0.5時，代表分類器分類效果與隨機猜測相同，模型無預測價值。
+#當AUC < 0.5時，代表分類器分類效果比隨機猜測差，但如果進行反預測，就會優於隨機猜測
+roc_obj <- roc(X_df$is_in_active_fault, X_df$predicted_prob) 
+plot(roc_obj, col = "blue", main = "ROC Curve")
+auc(roc_obj) #Area under the curve(AUC): 0.6181
+
+  
+  
+
+  

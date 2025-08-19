@@ -1,0 +1,128 @@
+library(fst)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(cluster)
+library(FactoMineR)
+library(factoextra)
+
+peogeo108 <- fread("F:/淡江/資料科學漫步/內政部/108年人_建物_地理資訊模擬資料/108年人+建物+地理資訊模擬資料/moi_people_house_dtl_simulation/moi_people_house_dtl_simulation.csv")
+peogeo109 <- fread("F:/淡江/資料科學漫步/內政部/109年人_建物_地理資訊模擬資料/109年人+建物+地理資訊模擬資料/moi_people_house_dtl_simulation.csv")
+peogeo110 <- fread("F:/淡江/資料科學漫步/內政部/110年人_建物_地理資訊模擬資料/2.110年人_建物_地理資訊模擬資料/moi_people_house_dtl_simulation.csv")
+peogeo111 <- fread("F:/淡江/資料科學漫步/內政部/111年人_建物_地理資訊模擬資料/111年人_建物_地理資訊資料/moi_people_house_dtl_simulation.csv")
+peogeo112 <- fread("F:/淡江/資料科學漫步/內政部/112年人_建物_地理資訊模擬資料/moi_people_house_dtl_simulation.csv")
+peogeo <- bind_rows(
+  mutate(peogeo108, file = 108),
+  mutate(peogeo109, file = 109,
+         new_disability_category=disability_lv),
+  mutate(peogeo110, file = 110,
+         new_disability_category=disability_lv),
+  mutate(peogeo111, file = 111,
+         new_disability_category=disability_lv),
+  mutate(peogeo112, file = 112,
+         new_disability_category=disability_lv)
+)
+peogeo <- peogeo%>%
+  mutate(age=file+1911-year(birthday_date),
+         child_age=file+1911-year(first_child_birthday))
+
+fileselect <- function(file_sel){
+  
+  peogeogower <- peogeo%>%
+    filter(file==file_sel)%>%
+    dplyr::select(gender_cd,education_cd,marriage_cd,living_type_cd,
+                  household_type_cd,new_disability_category,move_cnt,child_cnt,
+                  is_living_same_county,having_house_type_cd,floor_group_cd,
+                  purpose_group_cd,materials_group_cd,b_area,b_age,is_in_active_fault,
+                  is_in_dip_slope,is_in_lique_faction)%>%
+    mutate(education_cd = na_if(education_cd, 6),
+           household_type_cd = na_if(household_type_cd, 8),
+           floor_group_cd = na_if(floor_group_cd, 99),
+           is_in_active_fault=na_if(is_in_active_fault,2),
+           is_in_lique_faction =na_if(is_in_lique_faction,4),
+           is_in_dip_slope=na_if(is_in_dip_slope,2),
+           gender_cd=as.factor(gender_cd),
+           marriage_cd=as.factor(marriage_cd),
+           living_type_cd=as.factor(living_type_cd),
+           household_type_cd=as.factor(household_type_cd),
+           new_disability_category=as.factor(new_disability_category),
+           is_living_same_county=as.factor(is_living_same_county),
+           having_house_type_cd=as.factor(having_house_type_cd),
+           purpose_group_cd=as.factor(purpose_group_cd),
+           materials_group_cd=as.factor(materials_group_cd))
+  nrow(peogeogower)%>%print()
+  colSums(is.na(peogeogower))%>%print()
+  peogeogower <- na.omit(peogeogower)
+  nrow(peogeogower)%>%print()
+  return(peogeogower)
+}
+
+df_108 <- fileselect(108)
+df_109 <- fileselect(109)
+df_110 <- fileselect(110)
+df_111 <- fileselect(111)
+df_112 <- fileselect(112)
+res108 <- FAMD(df_108, ncp = 18, graph = FALSE)
+res109 <- FAMD(df_109, ncp = 18, graph = FALSE)
+res110 <- FAMD(df_110, ncp = 18, graph = FALSE)
+res111 <- FAMD(df_111, ncp = 18, graph = FALSE)
+res112 <- FAMD(df_112, ncp = 18, graph = FALSE)
+
+model_109 <- glm(is_in_active_fault ~ education_cd+move_cnt+child_cnt+floor_group_cd+b_area+b_age+
+                 gender_cd+marriage_cd+living_type_cd+household_type_cd+new_disability_category+
+                 is_living_same_county+having_house_type_cd+purpose_group_cd+materials_group_cd,
+                 data = df_109, 
+                 family = binomial(link = "logit"))
+summary(model_109)
+exp(coef(model_109))
+num_vars <- c("education_cd","move_cnt","child_cnt","floor_group_cd","b_area","b_age")  
+cat_vars <- c("gender_cd","marriage_cd","living_type_cd","household_type_cd","new_disability_category",
+              "is_living_same_county","having_house_type_cd","purpose_group_cd","materials_group_cd")
+names(peogeogower)
+res <- FAMD(peo_no_na, ncp = 18, graph = FALSE)
+fviz_famd_var(res, repel = TRUE)              
+fviz_contrib(res, "var", axes = 1)            
+fviz_contrib(res, "var", axes = 2) 
+fviz_contrib(res, "var", axes = 3) 
+res$eig
+
+famd_coords_108 <- as.data.frame(res108$ind$coord)
+famd_coords_109 <- as.data.frame(res109$ind$coord)
+famd_coords_110 <- as.data.frame(res110$ind$coord)
+famd_coords_111 <- as.data.frame(res111$ind$coord)
+famd_coords_112 <- as.data.frame(res112$ind$coord)
+model_data108 <- cbind(y = df_108$is_in_active_fault, famd_coords_108)
+model_data109 <- cbind(y = df_109$is_in_active_fault, famd_coords_109)
+model_data110 <- cbind(y = df_110$is_in_active_fault, famd_coords_110)
+model_data111 <- cbind(y = df_111$is_in_active_fault, famd_coords_111)
+model_data112 <- cbind(y = df_112$is_in_active_fault, famd_coords_112)
+
+model_108 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data108, 
+                 family = binomial(link = "logit"))
+summary(model_108)
+exp(coef(model_108))
+res108$eig
+fviz_contrib(res108, "var", axes = 1)            
+fviz_contrib(res108, "var", axes = 2) 
+fviz_contrib(res108, "var", axes = 3) 
+
+model_109 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data109, 
+                 family = binomial(link = "logit"))
+summary(model_109)
+exp(coef(model_109))
+res109$eig
+fviz_contrib(res109, "var", axes = 1)            
+fviz_contrib(res109, "var", axes = 2) 
+fviz_contrib(res109, "var", axes = 3) 
+
+model_110 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data110, 
+                 family = binomial(link = "logit"))
+model_111 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data111, 
+                 family = binomial(link = "logit"))
+model_112 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data112, 
+                 family = binomial(link = "logit"))
+summary(model)
+exp(coef(model))
+
+fwrite(peogeogower,"F:/淡江/資料科學漫步/內政部/data108.csv")
+

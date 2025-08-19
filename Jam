@@ -27,7 +27,7 @@ data <- fread("D:/DataScienceWalk/112peoplebulidinggeoData/112moi_people_house_d
 
 
 
-# 轉換 birthday_date → age（以 2025 年 1 月 1 日為基準）
+# 轉換 birthday_date → age（以 2024 年 1 月 1 日為基準）
 # 假設 birthday_date 是日期格式或可轉換為 "yyyy-mm-dd"
 data$birthday_date <- as.Date(data$birthday_date)
 data$movein_date <- as.Date(data$movein_date)

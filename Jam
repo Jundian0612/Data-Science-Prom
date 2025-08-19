@@ -39,7 +39,7 @@ data$movein_date <- floor(interval(data$movein_date, ref_date) / years(1))
 data$first_child_birthday <- floor(interval(data$first_child_birthday, ref_date) / years(1))
 
 #-----------------------呼叫資料與修正資料--------------------------------------
-# 建立 13 個解釋變數（含 age）
+# 建立 7 個解釋變數（含 age）+ Y
 pca_data <- data %>%
   select(age, move_cnt, movein_date, first_child_birthday, first_own_house_year, 
          child_cnt, b_area,is_in_active_fault)

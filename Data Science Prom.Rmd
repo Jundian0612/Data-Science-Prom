@@ -101,6 +101,16 @@ results <- bind_rows(
 
 # -----------------------------
 # 5. 檢視結果 (Odds Ratios)
+# outcome → 哪個風險變數 (斷層 / 液化 / 坡地)
+# term → 自變數名稱
+# estimate → OR (Odds Ratio)
+# conf.low, conf.high → 95% 信賴區間
+# p.value → 顯著性檢定
+
+# Ex:
+# If education_cd高中以上 的 OR = 0.7 (p < 0.01)，代表高學歷者住在風險區的機率 少 30%。
+# If having_house_type_cd=自有 的 OR = 1.5 (p < 0.05)，代表有房者住在風險區的機率 高 50%。
+# If b_age 的 OR = 1.02，代表年齡每增加 1 歲，住在風險區的機率增加 2%。
 # -----------------------------
 results %>%
   select(outcome, term, estimate, conf.low, conf.high, p.value) %>%

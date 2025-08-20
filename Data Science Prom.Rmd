@@ -1,0 +1,113 @@
+---
+title: "Data Science Prom"
+author: "Jundian"
+date: "2025-08-14"
+output: html_document
+---
+# Main
+```{r}
+library(dplyr)
+
+# 年份列表
+years <- 108:112
+
+# 讀取並統一欄位名稱 + 新增年份欄位
+all_data <- lapply(years, function(y) {
+  file_name <- paste0("moi_people_house_dtl_simulation_", y, ".csv")
+  df <- read.csv(file_name)
+  
+  # 欄位名稱統一
+  if ("new_disability_category" %in% colnames(df)) {
+    colnames(df)[colnames(df) == "new_disability_category"] <- "disability_lv"
+  }
+  
+  # 新增年份欄位並移到第一個
+  df <- df %>%
+    mutate(years = y) %>%
+    relocate(years, .before = 1)
+  
+  df
+}) %>%
+  bind_rows()
+
+# 檢查
+head(all_data)
+
+```
+
+# Test
+```{r}
+library(dplyr)
+library(broom)   # 整理模型輸出
+
+# -----------------------------
+# 1. 清理三個風險變數
+# -----------------------------
+all_data <- all_data %>%
+  mutate(
+    # 斷層帶：0=非斷層, 1=在斷層, 2=NA
+    is_in_active_fault = case_when(
+      is_in_active_fault == "1" ~ 1,
+      is_in_active_fault == "0" ~ 0,
+      TRUE ~ NA_real_
+    ),
+    
+    # 液化區 (二元化)：0=非液化, 1=液化 (低/中/高), 4=NA
+    is_in_lique_binary = case_when(
+      is_in_lique_faction %in% c("1","2","3") ~ 1,
+      is_in_lique_faction == "0" ~ 0,
+      TRUE ~ NA_real_
+    ),
+    
+    # 液化區 (等級化)：0=非液化, 1=低, 2=中, 3=高, 4=NA
+    is_in_lique_level = case_when(
+      is_in_lique_faction %in% c("0","1","2","3") ~ as.numeric(is_in_lique_faction),
+      TRUE ~ NA_real_
+    ),
+    
+    # 順逆向坡：0=非, 1=是, 2=NA
+    is_in_dip_slope = case_when(
+      is_in_dip_slope == "1" ~ 1,
+      is_in_dip_slope == "0" ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
+
+# -----------------------------
+# 2. 選擇自變數
+# -----------------------------
+vars <- c("b_age", "gender_cd", "education_cd", 
+          "marriage_cd", "child_cnt", "having_house_type_cd")
+
+# -----------------------------
+# 3. 定義一個函數，跑 logistic regression 並輸出 OR
+# -----------------------------
+run_logit <- function(data, outcome, predictors) {
+  fml <- as.formula(paste(outcome, "~", paste(predictors, collapse = " + ")))
+  model <- glm(fml, data = data, family = binomial)
+  tidy(model, exponentiate = TRUE, conf.int = TRUE) %>%
+    mutate(outcome = outcome)
+}
+
+# -----------------------------
+
+# 4. 分別跑三個模型
+# -----------------------------
+results <- bind_rows(
+  run_logit(all_data, "is_in_active_fault", vars),
+  run_logit(all_data, "is_in_lique_binary", vars),
+  run_logit(all_data, "is_in_dip_slope", vars)
+)
+
+# -----------------------------
+# 5. 檢視結果 (Odds Ratios)
+# -----------------------------
+results %>%
+  select(outcome, term, estimate, conf.low, conf.high, p.value) %>%
+  arrange(outcome, term) %>% 
+  mutate(p.value = round(p.value, 3))
+
+
+```
+
+

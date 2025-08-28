@@ -5,6 +5,27 @@ library(lubridate)
 library(cluster)
 library(FactoMineR)
 library(factoextra)
+library(MASS) 
+library(tibble)
+library(purrr)
+library(broom)
+library(stringr)
+library(tidyr)
+library(sf)
+library(mgcv)
+library(parallel)
+library(lwgeom)
+library(spdep)
+library(glmmTMB)
+library(INLA)
+library(forcats)
+library(GWmodel)
+library(sp)
+library(viridis)
+library(RColorBrewer)
+library(tmap)
+
+
 
 peogeo108 <- fread("F:/淡江/資料科學漫步/內政部/108年人_建物_地理資訊模擬資料/108年人+建物+地理資訊模擬資料/moi_people_house_dtl_simulation/moi_people_house_dtl_simulation.csv")
 peogeo109 <- fread("F:/淡江/資料科學漫步/內政部/109年人_建物_地理資訊模擬資料/109年人+建物+地理資訊模擬資料/moi_people_house_dtl_simulation.csv")
@@ -26,14 +47,36 @@ peogeo <- peogeo%>%
   mutate(age=file+1911-year(birthday_date),
          child_age=file+1911-year(first_child_birthday))
 
+tw_town <- st_read("F:/淡江/資料科學漫步/資料科學漫步/村(里)界(TWD97經緯度)/VILLAGE_NLSC_1140620.shp") |> 
+  st_make_valid()
+
+tw_town <- st_transform(tw_town, 3826)
+
+tw_town_single <- tw_town %>%
+  group_by(VILLCODE, COUNTYNAME, TOWNNAME, VILLNAME) %>%
+  summarise(.groups = "drop")
+
+tw_town_pts_proj <- tw_town_single %>%
+  mutate(geom_pt = st_point_on_surface(geometry)) %>%
+  st_set_geometry("geom_pt")
+
+#tw_town_pts <- st_transform(tw_town_pts_proj, 4326)
+tw_town_pts <- tw_town_pts_proj
+
+town_xy <- tw_town_pts |>
+  mutate(lon = st_coordinates(geom_pt)[,1],
+         lat = st_coordinates(geom_pt)[,2]) |>
+  st_drop_geometry() |>
+  dplyr::select(VILLCODE, COUNTYNAME, TOWNNAME,VILLNAME, lon, lat)
+
 fileselect <- function(file_sel){
   
   peogeogower <- peogeo%>%
     filter(file==file_sel)%>%
-    dplyr::select(gender_cd,education_cd,marriage_cd,living_type_cd,
+    dplyr::select(coun_cd,addr_city_cd,addr_village_cd,gender_cd,education_cd,marriage_cd,living_type_cd,
                   household_type_cd,new_disability_category,move_cnt,child_cnt,
                   is_living_same_county,having_house_type_cd,floor_group_cd,
-                  purpose_group_cd,materials_group_cd,b_area,b_age,is_in_active_fault,
+                  purpose_group_cd,materials_group_cd,b_area,b_age,age,is_in_active_fault,
                   is_in_dip_slope,is_in_lique_faction)%>%
     mutate(education_cd = na_if(education_cd, 6),
            household_type_cd = na_if(household_type_cd, 8),
@@ -41,6 +84,7 @@ fileselect <- function(file_sel){
            is_in_active_fault=na_if(is_in_active_fault,2),
            is_in_lique_faction =na_if(is_in_lique_faction,4),
            is_in_dip_slope=na_if(is_in_dip_slope,2),
+           having_house_type_cd=na_if(having_house_type_cd,"99"),
            gender_cd=as.factor(gender_cd),
            marriage_cd=as.factor(marriage_cd),
            living_type_cd=as.factor(living_type_cd),
@@ -54,7 +98,57 @@ fileselect <- function(file_sel){
   colSums(is.na(peogeogower))%>%print()
   peogeogower <- na.omit(peogeogower)
   nrow(peogeogower)%>%print()
-  return(peogeogower)
+  #town_xy$VILLCODE <- town_xy$VILLCODE%>%as.integer()
+  peogeogower$addr_village_cd <- peogeogower$addr_village_cd%>%as.character()
+  
+  joined <- peogeogower %>%
+    left_join(town_xy, by = c("addr_village_cd" = "VILLCODE"))
+  
+  joined_fix <- joined %>%
+    mutate(addr_village_cd2 = if_else(
+      is.na(lon) | is.na(lat),           #
+      str_pad(addr_village_cd, width=11, pad="0"),  
+      addr_village_cd                    
+    )) %>%
+    left_join(town_xy, by = c("addr_village_cd2" = "VILLCODE"),
+              suffix = c("", "_fix"))
+  
+  joined_step2 <- joined_fix %>%
+    mutate(
+      lon = coalesce(lon, lon_fix),
+      lat = coalesce(lat, lat_fix)
+    )
+  
+  ref7 <- town_xy %>%
+    mutate(VILLCODE = as.character(VILLCODE),
+           code7    = substr(VILLCODE, 1, 7)) %>%
+    group_by(code7) %>%
+    summarise(
+      lon_7 = mean(lon, na.rm = TRUE),
+      lat_7 = mean(lat, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(                     
+      lon_7 = ifelse(is.nan(lon_7), NA_real_, lon_7),
+      lat_7 = ifelse(is.nan(lat_7), NA_real_, lat_7)
+    )
+  
+  joined_final <- joined_step2 %>%
+    mutate(
+      addr_village_cd_chr = str_pad(as.character(addr_village_cd), width = 10, pad = "0"),
+      code7 = substr(addr_village_cd_chr, 1, 7)
+    ) %>%
+    left_join(ref7, by = "code7") %>%
+    mutate(
+      lon = coalesce(lon, lon_7),
+      lat = coalesce(lat, lat_7)
+    ) %>%
+    dplyr::select(
+      -tidyselect::ends_with("_fix"),
+      -any_of(c("addr_village_cd2", "addr_village_cd_chr", "code7", "lon_7", "lat_7"))
+    )
+
+  return(joined_final)
 }
 
 df_108 <- fileselect(108)
@@ -62,67 +156,899 @@ df_109 <- fileselect(109)
 df_110 <- fileselect(110)
 df_111 <- fileselect(111)
 df_112 <- fileselect(112)
-res108 <- FAMD(df_108, ncp = 18, graph = FALSE)
-res109 <- FAMD(df_109, ncp = 18, graph = FALSE)
-res110 <- FAMD(df_110, ncp = 18, graph = FALSE)
-res111 <- FAMD(df_111, ncp = 18, graph = FALSE)
-res112 <- FAMD(df_112, ncp = 18, graph = FALSE)
 
-model_109 <- glm(is_in_active_fault ~ education_cd+move_cnt+child_cnt+floor_group_cd+b_area+b_age+
-                 gender_cd+marriage_cd+living_type_cd+household_type_cd+new_disability_category+
-                 is_living_same_county+having_house_type_cd+purpose_group_cd+materials_group_cd,
-                 data = df_109, 
-                 family = binomial(link = "logit"))
-summary(model_109)
+modelglm <- function(df){
+  glmmodel <- glm.nb(is_in_active_fault ~ education_cd + move_cnt + child_cnt +
+                       floor_group_cd + b_area + b_age + gender_cd + marriage_cd +
+                       living_type_cd + household_type_cd +
+                       is_living_same_county + purpose_group_cd + materials_group_cd + age,
+                     data=df)
+  return(glmmodel)
+}
+
+library(car)
+glmmodel108 <- modelglm(df_108)
+glmmodel109 <- modelglm(df_109)
+glmmodel110 <- modelglm(df_110)
+glmmodel111 <- modelglm(df_111)
+glmmodel112 <- modelglm(df_112)
+
+vif(glmmodel108)
+vif(glmmodel109)
+vif(glmmodel110)
+vif(glmmodel111)
+vif(glmmodel112)
+
+glmbuild <- function(df){
+  glmmodel <- glm.nb(is_in_active_fault ~ education_cd + living_type_cd + household_type_cd + 
+                       child_cnt + b_age + gender_cd + marriage_cd + floor_group_cd + purpose_group_cd + 
+                       materials_group_cd + b_area + age,
+                     data=df)
+  
+  # GLMM檢查空間隨機截距
+  glmmmodel <- glmmTMB(
+    is_in_active_fault ~ education_cd + living_type_cd + household_type_cd + 
+      child_cnt + b_age + gender_cd + marriage_cd + floor_group_cd + purpose_group_cd + 
+      materials_group_cd + b_area + age + (1 | addr_village_cd),                    
+    data   = df,
+    family = binomial(link = "logit")
+  )
+  return(
+    list(
+      glmmodel=glmmodel,
+      glmmmodel=glmmmodel
+    )
+  )
+}
+glm108 <- glmbuild(df_108)
+glm109 <- glmbuild(df_109)
+glm110 <- glmbuild(df_110)
+glm111 <- glmbuild(df_111)
+glm112 <- glmbuild(df_112)
+
+# GLMM檢查空間隨機截距
+glmmmodel_108 <- glmmTMB(
+  is_in_active_fault ~ education_cd + living_type_cd + household_type_cd + 
+    child_cnt + b_age + gender_cd + marriage_cd + floor_group_cd + purpose_group_cd + 
+    materials_group_cd + b_area + age + (1 | addr_village_cd),                    
+  data   = df_108,
+  family = binomial(link = "logit")
+)
+
+vill_sf <- tw_town_single %>%
+  mutate(VILLCODE = as.character(VILLCODE)) %>%
+  semi_join(df_108 %>% transmute(addr_village_cd = as.character(addr_village_cd)),
+            by = c("VILLCODE" = "addr_village_cd"))
+
+# 2) 建鄰接（Queen 邻接；有孤島也不會炸）
+nb    <- poly2nb(vill_sf, queen = TRUE)
+listw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+# 3) 取出村里隨機截距 u_j，並與 vill_sf 對齊
+re_tbl <- ranef(glmmmodel)$cond$addr_village_cd
+u_j    <- re_tbl[,1]                                 # 第1欄通常是 (Intercept)
+names(u_j) <- rownames(re_tbl)                       # 名稱＝村里碼（因子水準）
+
+# 對齊順序：照 vill_sf$VILLCODE 的順序排列 u_j
+u_j <- u_j[ match(vill_sf$VILLCODE, names(u_j)) ]
+
+# 4) Moran's I（解析式 & permutation，建議以 permutation 為主）
+moran.test(u_j, listw, zero.policy = TRUE)       # 解析式
+moran.mc(u_j, listw, nsim = 999, zero.policy = TRUE)  # permutation
+vill_sf$u_j <- u_j
+ggplot(vill_sf) +
+  geom_sf(aes(fill = u_j)) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(title = "GLMM 村里隨機截距",
+       fill = "偏移量") +
+  theme_minimal()
+sum(is.na(vill_sf$u_j))
+vill_sf %>% filter(is.na(u_j)) %>% dplyr::select(VILLCODE, VILLNAME)
+
+# BYM2 全局模型看不同地區差異
+{
+  stopifnot(length(vill_levels) == nrow(vill_sf))
+  stopifnot(all(vill_levels == as.character(vill_sf$VILLCODE)))  # 順序一致很重要
+  
+  buildBYM2 <- function(df){
+    vill_sf <- tw_town_single %>%
+      mutate(VILLCODE = as.character(VILLCODE)) %>%
+      semi_join(df %>% transmute(addr_village_cd = as.character(addr_village_cd)),
+                by = c("VILLCODE" = "addr_village_cd"))
+    
+    # 2) 建鄰接（Queen 邻接；有孤島也不會炸）
+    nb    <- poly2nb(vill_sf, queen = TRUE)
+    listw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+    
+    # 3) 取出村里隨機截距 u_j，並與 vill_sf 對齊
+    re_tbl <- ranef(glmmmodel)$cond$addr_village_cd
+    u_j    <- re_tbl[,1]                                 # 第1欄通常是 (Intercept)
+    names(u_j) <- rownames(re_tbl)                       # 名稱＝村里碼（因子水準）
+    
+    # 對齊順序：照 vill_sf$VILLCODE 的順序排列 u_j
+    u_j <- u_j[ match(vill_sf$VILLCODE, names(u_j)) ]
+    
+    # B) 孤島（度數=0）的多邊形
+    deg <- card(nb)
+    islands <- which(deg == 0)
+    cat("Islands:", length(islands), "→", if (length(islands)) paste(head(islands,10), "...") else "none", "\n")
+    
+    # C) graph 節點數與 area_id 範圍
+    stopifnot(g$n == length(vill_levels))
+    rng <- range(df$area_id, na.rm = TRUE)
+    cat("area_id range:", paste(rng, collapse=" : "), "  g$n:", g$n, "\n")
+    #stopifnot(all(df$area_id >= 1L & df$area_id <= g$n))
+    
+    # D) y 是否穩定（你之前已檢查過，這裡再保險）
+    #stopifnot(df[, all(is_in_active_fault %in% c(0L,1L))])
+    
+    safe_inla <- function(formula, data, wd="C:/INLA_tmp") {
+      dir.create(wd, showWarnings = FALSE)
+      INLA::inla.setOption("working.directory", wd)
+      tryCatch({
+        fit <- INLA::inla(
+          formula, family = "binomial", data = data,
+          control.compute   = list(dic=TRUE, waic=TRUE, cpo=TRUE),
+          control.predictor = list(compute=TRUE),
+          keep = TRUE, verbose = TRUE
+        )
+        if (isTRUE(fit$ok)) {
+          message("INLA ok ✓  DIC=", fit$dic$dic, "  WAIC=", fit$waic$waic)
+        } else {
+          message("INLA returned ok=FALSE（但未拋錯），請檢查工作目錄。")
+        }
+        fit
+      }, error = function(e) {
+        cat("INLA failed: ", conditionMessage(e), "\n")
+        # 把關鍵檔案列出來（你可以再 readLines() 檢視）
+        cat("Listing files under ", wd, ":\n", sep = "")
+        print(list.files(wd, recursive = TRUE, full.names = TRUE))
+        invisible(NULL)
+      })
+    }
+    
+    fit0 <- safe_inla(is_in_active_fault ~ 1, data = df)
+    summary(fit0)
+    
+    # ICAR/BYM2：確保 graph、area_id 一致
+    form_icar <- is_in_active_fault ~ 1 +
+      f(area_id, model = "besag", graph = g, scale.model = TRUE, constr = TRUE)
+    
+    fit_icar <- safe_inla(form_icar, data = df)
+    summary(fit_icar)
+    
+    # 若擔心孤島對 ICAR 造成漂移，改用 BYM2 通常更穩
+    dir.create("C:/INLA_tmp", showWarnings = FALSE)
+    INLA::inla.setOption("working.directory", "C:/INLA_tmp")
+    
+    form_bym2 <- is_in_active_fault ~ education_cd + living_type_cd + household_type_cd + 
+      child_cnt + b_age + gender_cd + marriage_cd + b_area + age+
+      f(area_id, model = "bym2", graph = g, scale.model = TRUE,
+        hyper = list(
+          prec = list(prior = "pc.prec", param = c(1, 0.01),
+                      initial = log(1), fixed = FALSE),
+          phi  = list(prior = "pc",      param = c(0.5, 2/3),
+                      initial = qlogis(0.5), fixed = FALSE)
+        )
+      )
+    
+    # 第 1 段：Gaussian 近似，取得穩定 mode
+    fit_bym2_g <- INLA::inla(
+      form_bym2, family = "binomial", data = df,
+      control.inla    = list(strategy = "gaussian"),
+      control.compute = list(dic = TRUE, waic = TRUE, config = TRUE),
+      control.fixed   = list(prec.intercept = 1e-4),
+      working.directory = "C:/INLA_tmp", keep = TRUE, verbose = TRUE
+    )
+    
+    # 第 2 段：用上一段的 mode 當起點，改回 simplified.laplace
+    fit_bym2 <- INLA::inla(
+      form_bym2, family = "binomial", data = df,
+      control.inla    = list(strategy = "simplified.laplace"),
+      control.mode    = list(result = fit_bym2_g, restart = TRUE),
+      control.compute = list(dic = TRUE, waic = TRUE, config = TRUE),
+      control.fixed   = list(prec.intercept = 1e-4),
+      working.directory = "C:/INLA_tmp", keep = TRUE, verbose = TRUE
+    )
+    
+    fit_bym2_summary <- summary(fit_bym2)
+    exp(fit_bym2_summary$fixed)%>%round(3)
+    fit_bym2$ok; summary(fit_bym2)$fixed
+    return(fit_bym2)
+  }
+  write_inla_adj_from_nb <- function(file, nb) {
+    n <- length(nb)
+    con <- file(file, open = "w", encoding = "UTF-8")
+    on.exit(close(con), add = TRUE)
+    cat(n, file = con)
+    for (i in seq_len(n)) {
+      nei <- nb[[i]]
+      k <- length(nei)
+      if (k == 0) cat("\n0", file = con)
+      else        cat("\n", k, " ", paste(nei, collapse = " "), sep = "", file = con)
+    }
+    invisible(file)
+  }
+  make_index_graph <- function(df, tw_town_single, epsg = 3826, snap = 50) {
+    stopifnot(all(c("addr_village_cd","is_in_active_fault") %in% names(df)))
+    
+    # 1) 準備資料型別（保留前導零）
+    df <- df %>%
+      dplyr::mutate(
+        addr_village_cd    = as.character(addr_village_cd),
+        is_in_active_fault = as.integer(is_in_active_fault)
+      )
+    
+    # 2) 只保留出現在 df 的村里圖層；確保幾何有效＋投影
+    vill_sf <- tw_town_single %>%
+      dplyr::mutate(VILLCODE = as.character(VILLCODE)) %>%
+      dplyr::semi_join(df %>% dplyr::distinct(addr_village_cd),
+                       by = c("VILLCODE" = "addr_village_cd")) %>%
+      sf::st_make_valid()
+    
+    if (sf::st_is_longlat(vill_sf)) {
+      vill_sf <- sf::st_transform(vill_sf, epsg)  # 台灣常用 EPSG:3826
+    }
+    
+    # 3) 鄰接＋孤島資訊
+    nb  <- spdep::poly2nb(vill_sf, queen = TRUE, snap = snap)
+    deg <- spdep::card(nb)
+    islands <- which(deg == 0)
+    cat("Islands:", length(islands),
+        if (length(islands)) paste0(" → ", paste(head(islands, 10), collapse = ",")) else "", "\n")
+    
+    # 4) 以 vill_sf 的順序定義 levels，映射出 1..n 的 area_id
+    vill_levels <- as.character(vill_sf$VILLCODE)
+    df <- df %>%
+      dplyr::mutate(area_id = as.integer(factor(addr_village_cd, levels = vill_levels)))
+    
+    lost <- setdiff(unique(df$addr_village_cd), vill_levels)
+    if (length(lost)) {
+      warning("以下村里碼不在地圖中，將被剔除：\n", paste(head(lost, 50), collapse = ", "))
+    }
+    df <- df %>% dplyr::filter(!is.na(area_id))
+    
+    # 5) 建 INLA graph
+    adj_file <- tempfile(fileext = ".adj")
+    write_inla_adj_from_nb(adj_file, nb)
+    g <- INLA::inla.read.graph(adj_file)
+    
+    stopifnot(g$n == length(vill_levels))
+    stopifnot(identical(range(df$area_id), c(1L, length(vill_levels))))
+    
+    list(df = df, vill_sf = vill_sf, nb = nb, g = g, vill_levels = vill_levels)
+  }
+  fit_bym2_year <- function(ix) {
+    df      <- ix$df
+    g       <- ix$g
+    
+    # Baseline
+    fit0 <- INLA::inla(
+      is_in_active_fault ~ 1,
+      family = "binomial", data = df,
+      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+      control.predictor = list(compute = TRUE),
+      control.fixed = list(prec.intercept = 1e-4),
+      verbose = TRUE, keep = TRUE
+    )
+    
+    # ICAR
+    form_icar <- is_in_active_fault ~ 1 +
+      f(area_id, model = "besag", graph = g, scale.model = TRUE, constr = TRUE)
+    
+    fit_icar <- INLA::inla(
+      form_icar, family = "binomial", data = df,
+      control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+      control.predictor = list(compute = TRUE),
+      control.fixed = list(prec.intercept = 1e-4),
+      verbose = TRUE, keep = TRUE
+    )
+    
+    # BYM2：兩段法
+    form_bym2 <- is_in_active_fault ~
+      education_cd + living_type_cd + household_type_cd +
+      child_cnt + b_age + gender_cd + marriage_cd + floor_group_cd + purpose_group_cd +
+      materials_group_cd + b_area + age +
+      f(area_id, model = "bym2", graph = g, scale.model = TRUE,
+        hyper = list(
+          prec = list(prior = "pc.prec", param = c(1, 0.01)),
+          phi  = list(prior = "pc",      param = c(0.5, 2/3))
+        ))
+    
+    fit_bym2_g <- INLA::inla(
+      form_bym2, family = "binomial", data = df,
+      control.inla    = list(strategy = "gaussian"),
+      control.compute = list(dic = TRUE, waic = TRUE, config = TRUE),
+      control.predictor = list(compute = TRUE),
+      control.fixed   = list(prec.intercept = 1e-4),
+      verbose = TRUE, keep = TRUE
+    )
+    
+    fit_bym2 <- INLA::inla(
+      form_bym2, family = "binomial", data = df,
+      control.inla    = list(strategy = "simplified.laplace"),
+      control.mode    = list(result = fit_bym2_g, restart = TRUE),
+      control.compute = list(dic = TRUE, waic = TRUE, config = TRUE),
+      control.predictor = list(compute = TRUE),
+      control.fixed   = list(prec.intercept = 1e-4),
+      verbose = TRUE, keep = TRUE
+    )
+    
+    list(fit0 = fit0, icar = fit_icar, bym2 = fit_bym2)
+  }
+  buildBYM2 <- function(df) {
+    stopifnot(all(c("addr_village_cd","is_in_active_fault") %in% names(df)))
+    
+    # 0) 清理與型別
+    df <- df %>%
+      dplyr::mutate(
+        addr_village_cd   = as.character(addr_village_cd),
+        is_in_active_fault = as.integer(is_in_active_fault) # 0/1，避免是 logical/factor
+      )
+    
+    # 1) 只保留 df 有的村里做空間圖層，並建 nb（允許孤島）
+    vill_sf <- tw_town_single %>%
+      dplyr::mutate(VILLCODE = as.character(VILLCODE)) %>%
+      dplyr::semi_join(df %>% dplyr::distinct(addr_village_cd),
+                       by = c("VILLCODE" = "addr_village_cd"))
+    
+    if (sf::st_is_longlat(vill_sf)) {
+      # 台灣常用 TWD97 / TM2 (EPSG:3826)；你的 tw_town_single 若已有投影就不需轉
+      vill_sf <- sf::st_transform(vill_sf, 3826)
+    }
+    
+    
+    nb <- spdep::poly2nb(vill_sf, queen = TRUE, snap = 50)  # snap=50 公尺，視資料可調
+    deg <- spdep::card(nb)
+    islands <- which(deg == 0)
+    cat("Islands:", length(islands),
+        if (length(islands)) paste0("  → ", paste(head(islands, 10), collapse = ",")) else "", "\n")
+    
+    # --- 2) 以 vill_sf 的順序定義 levels，映射出 1..n 的 area_id ---
+    vill_levels <- as.character(vill_sf$VILLCODE)
+    df <- df %>%
+      dplyr::mutate(
+        addr_village_cd = as.character(addr_village_cd),
+        is_in_active_fault = as.integer(is_in_active_fault),
+        area_id = as.integer(factor(addr_village_cd, levels = vill_levels))
+      )
+    
+    lost <- setdiff(unique(df$addr_village_cd), vill_levels)
+    if (length(lost)) {
+      warning("以下村里碼在地圖中找不到，列數會被剔除：\n", paste(head(lost, 50), collapse = ", "))
+    }
+    df <- df %>% dplyr::filter(!is.na(area_id))
+    
+    # --- 3) 寫 .adj 檔並讀回 INLA graph ---
+    adj_file <- tempfile(fileext = ".adj")
+    write_inla_adj_from_nb(adj_file, nb)
+    g <- INLA::inla.read.graph(adj_file)
+    
+    stopifnot(g$n == length(vill_levels))
+    rng <- range(df$area_id)
+    cat("area_id range: ", rng[1], ":", rng[2], "   g$n: ", g$n, "\n", sep = "")
+    # 4) 包個安全的 inla 執行器（保留你的習慣）
+    safe_inla <- function(formula, data, strategy = NULL, mode_from = NULL, wd = "C:/INLA_tmp") {
+      dir.create(wd, showWarnings = FALSE)
+      INLA::inla.setOption("working.directory", wd)
+      INLA::inla(
+        formula, family = "binomial", data = data,
+        control.inla    = c(list(), if (!is.null(strategy)) list(strategy = strategy)),
+        control.mode    = if (!is.null(mode_from)) list(result = mode_from, restart = TRUE) else NULL,
+        control.compute = list(dic = TRUE, waic = TRUE, config = TRUE, cpo = TRUE),
+        control.predictor = list(compute = TRUE),
+        control.fixed   = list(prec.intercept = 1e-4),
+        keep = TRUE, verbose = TRUE
+      )
+    }
+    
+    # 5) Baseline & ICAR（INLA 名稱用 "besag"）
+    fit0 <- safe_inla(is_in_active_fault ~ 1, data = df)
+    
+    form_icar <- is_in_active_fault ~ 1 +
+      f(area_id, model = "besag", graph = g, scale.model = TRUE, constr = TRUE)
+    
+    fit_icar <- safe_inla(form_icar, data = df)
+    
+    # 6) BYM2：兩段法（先 gaussian 再 simplified.laplace）
+    form_bym2 <- is_in_active_fault ~
+      education_cd + living_type_cd + household_type_cd +
+      child_cnt + b_age + gender_cd + marriage_cd + b_area + age +
+      f(area_id, model = "bym2", graph = g, scale.model = TRUE,
+        hyper = list(
+          prec = list(prior = "pc.prec", param = c(1, 0.01)),
+          phi  = list(prior = "pc",      param = c(0.5, 2/3))
+        ))
+    
+    fit_bym2_g <- safe_inla(form_bym2, data = df, strategy = "gaussian")
+    fit_bym2   <- safe_inla(form_bym2, data = df, strategy = "simplified.laplace", mode_from = fit_bym2_g)
+    
+    # 7) 小結 &回傳
+    cat("OK ✓  DIC(icar)=", fit_icar$dic$dic, "  DIC(bym2)=", fit_bym2$dic$dic, "\n")
+    list(
+      fit0 = fit0, icar = fit_icar, bym2 = fit_bym2,
+      graph = g, vill_levels = vill_levels, vill_sf = vill_sf, df_used = df
+    )
+  }
+  
+  ix108 <- make_index_graph(df_108, tw_town_single)
+  ix109 <- make_index_graph(df_108, tw_town_single)
+  ix110 <- make_index_graph(df_108, tw_town_single)
+  ix111 <- make_index_graph(df_108, tw_town_single)
+  ix112 <- make_index_graph(df_108, tw_town_single)
+  BYM2_108 <- buildBYM2(df_108)
+  BYM2_109 <- buildBYM2(df_109)
+  BYM2_110 <- buildBYM2(df_110)
+  BYM2_111 <- buildBYM2(df_111)
+  BYM2_112 <- buildBYM2(df_112)
+  
+  re_sum <- fit_bym2$summary.random$area_id %>%
+    dplyr::select(ID, mean, sd, `0.025quant`, `0.5quant`, `0.975quant`) %>%
+    dplyr::rename(area_id = ID,
+                  re_mean = mean,
+                  re_sd   = sd,
+                  re_l95  = `0.025quant`,
+                  re_med  = `0.5quant`,
+                  re_u95  = `0.975quant`)
+  
+  # 2) 計算每個里「效應 > 0 的後驗機率」：P(re > 0)
+  #    用 marginals.random$area_id 的每個邊際分布做 pmarginal
+  re_margs <- fit_bym2$marginals.random$area_id
+  prob_pos <- map_dbl(re_margs, ~ 1 - INLA::inla.pmarginal(q = 0, marginal = .x))
+  
+  re_sum <- re_sum %>%
+    mutate(prob_re_gt0 = prob_pos,
+           # 標註顏色/分級：高可信正向、負向、與不確定
+           flag = case_when(
+             prob_re_gt0 >= 0.975 ~ "High (+)",     # 幾乎肯定「高於平均」
+             prob_re_gt0 <= 0.025 ~ "High (-)",     # 幾乎肯定「低於平均」
+             prob_re_gt0 >= 0.95  ~ "Prob (+)",
+             prob_re_gt0 <= 0.05  ~ "Prob (-)",
+             TRUE                 ~ "Uncertain"
+           ))
+  
+  # 3) 做成表格（依「顯著度」與大小排序），給你快速檢閱
+  re_table <- re_sum %>%
+    arrange(desc(prob_re_gt0), desc(re_mean))
+  
+  # 查看前幾名
+  print(head(re_table, 20))
+  
+  # 4) 合併到你的里界 shapefile（sf 物件）
+  #    假設你的邊界物件叫 areas_sf，且欄位與 area_id 可對上
+  #    若邊界的欄位名不同（例如 "VILLAGE_ID"），就改下面的 by= 對應。
+  map_sf <- vill_sf %>%
+    left_join(re_sum, by = "area_id")
+  
+  # 5) 畫 Exceedance Map：顯示 P(re > 0)
+  ggplot(map_sf) +
+    geom_sf(aes(fill = prob_re_gt0), linewidth = 0.1) +
+    scale_fill_viridis_c(name = "P(re > 0)",
+                         limits = c(0,1)) +
+    ggtitle("BYM2 地區隨機效應：超越機率 P(re > 0)") +
+    theme_minimal()
+  
+  # 6) 畫「分類版」地圖（更好解讀：High(+)/High(-)/Prob(+)/Prob(-)/Uncertain）
+  flag_levels <- c("High (+)", "Prob (+)", "Uncertain", "Prob (-)", "High (-)")
+  map_sf$flag <- factor(map_sf$flag, levels = flag_levels)
+  
+  ggplot(map_sf) +
+    geom_sf(aes(fill = flag), linewidth = 0.1) +
+    scale_fill_brewer(palette = "RdYlBu", direction = -1, name = "區域分類") +
+    ggtitle("BYM2 地區隨機效應分類地圖") +
+    theme_minimal()
+}
+
+# GWGLM 區域模型
+{
+  predictors <- c(
+    "education_cd", "living_type_cd", "household_type_cd",
+    "child_cnt", "b_age", "gender_cd", "marriage_cd", "floor_group_cd",
+    "purpose_group_cd", "materials_group_cd", "b_area", "age"
+  )
+  
+  # *** 已更新 ***
+  # TWD97 TM2 座標系統下台灣的大致範圍
+  # X (lon/Easting) 大約在 120000 到 370000 之間
+  # Y (lat/Northing) 大約在 2420000 到 2800000 之間
+  x_min <- 120000 
+  x_max <- 370000
+  y_min <- 2420000
+  y_max <- 2800000
+  
+  df_clean <- df_108 %>%
+    mutate(y = as.integer(is_in_active_fault)) %>%
+    dplyr::select(lon, lat, y, all_of(predictors)) %>%
+    filter(
+      is.finite(lon) & is.finite(lat) &
+        lon >= x_min & lon <= x_max &   # 使用 TM2 的 X 範圍過濾
+        lat >= y_min & lat <= y_max     # 使用 TM2 的 Y 範圍過濾
+    ) %>%
+    na.omit() %>%
+    as.data.frame()
+  sf_pts <- st_as_sf(df_clean, coords = c("lon", "lat"), crs = 3826)
+  
+  if (st_crs(sf_pts) != st_crs(vill_sf)) {
+    warning("點位和村里的座標系統不一致，請檢查！")
+    vill_sf <- st_transform(vill_sf, st_crs(sf_pts)) # 或反之
+  }
+  pts_with_vill_info <- st_join(sf_pts, vill_sf, join = st_intersects)
+  
+  calculate_entropy <- function(x) {
+    # 計算每個類別的比例 p(x)
+    proportions <- prop.table(table(x))
+    # 移除比例為0的類別，避免 log(0) 產生無限大
+    proportions <- proportions[proportions > 0]
+    # 計算熵
+    -sum(proportions * log(proportions))
+  }
+  village_summary <- pts_with_vill_info %>%
+    st_drop_geometry() %>%
+    group_by(VILLCODE) %>%
+    summarise(
+      n_households = n(),
+      avg_age = mean(age, na.rm = TRUE),
+      avg_child_cnt = mean(child_cnt, na.rm = TRUE),
+      prop_in_fault = mean(y, na.rm = TRUE),
+      avg_b_area = mean(b_area , na.rm = TRUE),
+      purpose_group_entropy = calculate_entropy(purpose_group_cd),
+      floor_group_entropy = calculate_entropy(floor_group_cd),
+      education_entropy = calculate_entropy(education_cd),
+      gender_entropy  = calculate_entropy(gender_cd),
+      living_type_entropy  = calculate_entropy(living_type_cd),
+      household_type_entropy = calculate_entropy(household_type_cd),
+      marriage_entropy = calculate_entropy(marriage_cd),
+      materials_group_entropy=calculate_entropy(materials_group_cd),
+      .groups = "drop"
+    )
+  
+  # 3c. 將總合結果合併回村里邊界圖層
+  vill_sf_with_stats <- vill_sf %>%
+    left_join(village_summary, by = "VILLCODE")
+  
+  head(vill_sf_with_stats)
+    
+  gwlr_data_sf <- vill_sf_with_stats %>%
+    na.omit() %>% # 移除任何欄位有NA的村里
+    filter(n_households > 0) %>% # 確保村里內至少有一戶
+    mutate(
+      # 為了做二項式迴歸，我們需要知道「成功」和「失敗」的次數
+      # 成功次數 = 在斷層帶內的戶數
+      n_fault = round(prop_in_fault * n_households),
+      # 失敗次數 = 不在斷層帶內的戶數
+      n_not_fault = n_households - n_fault
+    )
+  gwlr_data_centroids_sf <- st_centroid(gwlr_data_sf)
+  gwlr_data_centroids_sp <- as(gwlr_data_centroids_sf, "Spatial")
+  gwlr_data_sp <- as(gwlr_data_sf, "Spatial")
+    
+  gwlr_predictors <- c(
+    "avg_age", "avg_child_cnt", "avg_b_area",
+    "education_entropy", "household_type_entropy", "marriage_entropy",
+    "materials_group_entropy","purpose_group_entropy","floor_group_entropy",
+   "gender_entropy","living_type_entropy"
+  )
+  
+  # 2b. 建立公式
+  #     應變數 Y 的格式是 cbind(成功次數, 失敗次數)
+  form <- as.formula(
+    paste("cbind(n_fault, n_not_fault) ~", paste(gwlr_predictors, collapse = " + "))
+  )
+    
+  dMat <- sp::spDists(gwlr_data_centroids_sp, longlat = FALSE)
+    # Calculate bandwidth (this can take time)
+  bw <- bw.ggwr(
+    formula = form,
+    data    = gwlr_data_centroids_sp, # <-- Use the CENTROID points here
+    dMat = dMat,
+    family  = "binomial",
+    kernel  = "bisquare",
+    adaptive = TRUE,
+    approach = "AICc"
+  )
+  
+  print(paste("計算完成！最佳帶寬 (k個最近鄰) =", bw))
+  
+    
+    # Run the GWLR model
+    gwfit <- ggwr.basic(
+      formula = form,
+      data    = sp_pts,
+      bw      = bw,
+      family  = "binomial",
+      kernel  = "bisquare",
+      adaptive = TRUE,
+      longlat = FALSE # Correctly set to FALSE as we are using a projected CRS
+    )
+}
+
+glmmodel <- glm.nb(is_in_active_fault ~ education_cd + living_type_cd + household_type_cd + 
+                     child_cnt + b_age + gender_cd + marriage_cd + floor_group_cd + purpose_group_cd + 
+                     materials_group_cd + b_area + age,
+                   data=df_109)
+glmmmodel <- glmmTMB(
+  is_in_active_fault ~ education_cd + living_type_cd + household_type_cd + 
+    child_cnt + b_age + gender_cd + marriage_cd + floor_group_cd + purpose_group_cd + 
+    materials_group_cd + b_area + age + (1 | addr_village_cd),                    
+  data   = df_109,
+  family = binomial(link = "logit")
+)
+
+summary(glmmodel)
+exp(coef(glmmodel))
+
+df_108%>%filter(is.na(lon))%>%dplyr::select(addr_village_cd)%>%unique()
+df_109%>%filter(is.na(lon))%>%dplyr::select(addr_village_cd)%>%unique()
+df_110%>%filter(is.na(lon))%>%dplyr::select(addr_village_cd)%>%unique()
+df_111%>%filter(is.na(lon))%>%dplyr::select(addr_village_cd)%>%unique()
+df_112%>%filter(is.na(lon))%>%dplyr::select(addr_village_cd)%>%unique()
+
+df_108$having_house_type_cd%>%table()
+df_109$having_house_type_cd%>%table()
+df_110$having_house_type_cd%>%table()
+df_111$having_house_type_cd%>%table()
+df_112$having_house_type_cd%>%table()
+
+#FAMD
+{
+  res108 <- FAMD(df_108, ncp = 18, graph = FALSE)
+  res109 <- FAMD(df_109, ncp = 18, graph = FALSE)
+  res110 <- FAMD(df_110, ncp = 18, graph = FALSE)
+  res111 <- FAMD(df_111, ncp = 18, graph = FALSE)
+  res112 <- FAMD(df_112, ncp = 18, graph = FALSE)
+  
+  num_vars <- c("education_cd","move_cnt","child_cnt","floor_group_cd","b_area","b_age")  
+  cat_vars <- c("gender_cd","marriage_cd","living_type_cd","household_type_cd","new_disability_category",
+                "is_living_same_county","having_house_type_cd","purpose_group_cd","materials_group_cd")
+  names(peogeogower)
+  res <- FAMD(peo_no_na, ncp = 18, graph = FALSE)
+  fviz_famd_var(res, repel = TRUE)              
+  fviz_contrib(res, "var", axes = 1)            
+  fviz_contrib(res, "var", axes = 2) 
+  fviz_contrib(res, "var", axes = 3) 
+  res$eig
+  
+  famd_coords_108 <- as.data.frame(res108$ind$coord)
+  famd_coords_109 <- as.data.frame(res109$ind$coord)
+  famd_coords_110 <- as.data.frame(res110$ind$coord)
+  famd_coords_111 <- as.data.frame(res111$ind$coord)
+  famd_coords_112 <- as.data.frame(res112$ind$coord)
+  model_data108 <- cbind(y = df_108$is_in_active_fault, famd_coords_108)
+  model_data109 <- cbind(y = df_109$is_in_active_fault, famd_coords_109)
+  model_data110 <- cbind(y = df_110$is_in_active_fault, famd_coords_110)
+  model_data111 <- cbind(y = df_111$is_in_active_fault, famd_coords_111)
+  model_data112 <- cbind(y = df_112$is_in_active_fault, famd_coords_112)
+  
+  model_108 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data108, 
+                   family = binomial(link = "logit"))
+  summary(model_108)
+  exp(coef(model_108))
+  res108$eig
+  fviz_contrib(res108, "var", axes = 1)            
+  fviz_contrib(res108, "var", axes = 2) 
+  fviz_contrib(res108, "var", axes = 3) 
+  
+  model_109 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data109, 
+                   family = binomial(link = "logit"))
+  summary(model_109)
+  exp(coef(model_109))
+  res109$eig
+  fviz_contrib(res109, "var", axes = 1)            
+  fviz_contrib(res109, "var", axes = 2) 
+  fviz_contrib(res109, "var", axes = 3) 
+  
+  model_110 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data110, 
+                   family = binomial(link = "logit"))
+  model_111 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data111, 
+                   family = binomial(link = "logit"))
+  model_112 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data112, 
+                   family = binomial(link = "logit"))
+  summary(model)
+  exp(coef(model))
+}
+
+
+fileselect2 <- function(file_sel){
+  peogeo %>%
+    filter(file == file_sel) %>%
+    select(gender_cd,education_cd,marriage_cd,living_type_cd,
+           household_type_cd,new_disability_category,move_cnt,child_cnt,
+           is_living_same_county,having_house_type_cd,floor_group_cd,
+           purpose_group_cd,materials_group_cd,b_area,b_age,
+           is_in_active_fault,is_in_dip_slope,is_in_lique_faction) %>%
+    mutate(
+      # 先把空值碼轉 NA
+      is_in_active_fault  = na_if(is_in_active_fault, 2),
+      is_in_dip_slope     = na_if(is_in_dip_slope,  2),
+      is_in_lique_faction = na_if(is_in_lique_faction, 4),
+      
+      # 目標變數
+      active_fault_f = factor(ifelse(is_in_active_fault == 1, "Yes", "No"),
+                              levels = c("No","Yes")),
+      dip_slope_f    = factor(ifelse(is_in_dip_slope  == 1, "Yes", "No"),
+                              levels = c("No","Yes")),
+      lique_ord      = factor(is_in_lique_faction,
+                              levels = c(0,1,2,3),
+                              labels = c("None","Low","Mid","High"),
+                              ordered = TRUE),
+      
+      # 自變數型別
+      across(c(gender_cd,education_cd,marriage_cd,living_type_cd,
+               household_type_cd,new_disability_category,
+               is_living_same_county,having_house_type_cd,
+               purpose_group_cd,materials_group_cd), as.factor)
+    )
+}
+describe_yes <- function(df, target_f){
+  df_use <- df %>% drop_na(all_of(target_f))
+  idx <- which(names(df_use) == target_f)
+  cd  <- FactoMineR::catdes(df_use, num.var = idx, proba = 0.05)
+  
+  yes_key <- names(cd$category)[str_detect(names(cd$category), "=Yes$")][1]
+  comp <- cd$category[[yes_key]]
+  
+  list(
+    quanti_top = comp$quanti %>% as.data.frame() %>%
+      rownames_to_column("variable") %>%
+      arrange(desc(v.test)) %>% filter(v.test > 0),
+    quali_top  = comp$quali %>% as.data.frame() %>%
+      rownames_to_column("modality") %>%
+      arrange(desc(v.test)) %>% filter(v.test > 0)
+  )
+}
+
+# 多等級（液化）：把單一等級 vs 其餘
+describe_level_vs_rest <- function(df, target_ord, level_label){
+  df_use <- df %>% drop_na(all_of(target_ord))
+  df_bin <- df_use %>%
+    mutate(level_bin = factor(ifelse(.data[[target_ord]] == level_label, "This","Other")))
+  describe_yes(df_bin, "level_bin")
+}
+
+d108 <- fileselect2(108)
+res108_fault <- describe_yes(d108, "active_fault_f")     # 斷層=Yes 的刻畫
+res108_dip   <- describe_yes(d108, "dip_slope_f")        # 順逆向坡=Yes 的刻畫
+res108_liq_H <- describe_level_vs_rest(d108, "lique_ord", "High")  # 液化「高」vs 其他
+res108_liq_M <- describe_level_vs_rest(d108, "lique_ord", "Mid")   # 液化「中」vs 其他
+res108_liq_L <- describe_level_vs_rest(d108, "lique_ord", "Low")   # 液化「低」vs 其他
+
+mean(df_108$is_in_active_fault)
+glm0 <- glm(is_in_active_fault ~ education_cd + move_cnt + child_cnt +
+              floor_group_cd + b_area + b_age + gender_cd + marriage_cd +
+              living_type_cd + household_type_cd + new_disability_category +
+              is_living_same_county + purpose_group_cd + materials_group_cd,
+            data=df_108, family=binomial())
+summary(glm0) 
+
+tw_land <- sf::st_read("F:/淡江/資料科學漫步/資料科學漫步/村(里)界(TWD97經緯度)/VILLAGE_NLSC_1140620.shp") |> sf::st_transform(3826)
+
+# 1) 做 soap 邊界（每個島一個迴圈）
+bnd <- lapply(sf::st_geometry(sf::st_cast(sf::st_union(tw_land), "POLYGON")), function(g){
+  crd <- sf::st_coordinates(sf::st_cast(g, "LINESTRING"))[,1:2]
+  data.frame(lon = crd[,1], lat = crd[,2])
+})
+
+# 2) 產生內部 knots（邊界內的格點中心）
+grid <- sf::st_make_grid(tw_land, cellsize = 10000, what = "centers")
+kn   <- sf::st_coordinates(sf::st_intersection(grid, sf::st_union(tw_land)))
+knots <- data.frame(lon = kn[,1], lat = kn[,2])
+
+library(RhpcBLASctl)             # 控制 BLAS 執行緒數
+blas_set_num_threads(1)          # 防止 BLAS 與叢集「互搶」造成超訂閱
+
+# 只用「實體」核心
+workers <- parallel::detectCores(logical = FALSE)
+cl <- makeCluster(workers)
+fit_108 <- bam(
+  is_in_active_fault ~ education_cd + child_cnt + floor_group_cd +
+    b_area + b_age + gender_cd + marriage_cd + living_type_cd +
+    household_type_cd + new_disability_category + is_living_same_county +
+    purpose_group_cd + materials_group_cd +
+    s(lon, lat, bs = "so", k = 30, xt = list(bnd = bnd, nmax = 200)),
+  data      = df_108,
+  family    = binomial(),
+  method    = "fREML",
+  knots      = knots,
+  discrete  = FALSE,
+  cluster   = cl,               
+  chunk.size= 1000000,              
+  use.chol  = FALSE,              
+  gamma     = 1.4,
+  select    = TRUE
+)
+stopCluster(cl)
+
+
+summary(fit_108)
+vis.gam(fit_108, view=c("lon","lat"), plot.type="contour")
+
+grid <- expand.grid(
+  lon = seq(min(df_108$lon), max(df_108$lon), length.out = 100),
+  lat = seq(min(df_108$lat), max(df_108$lat), length.out = 100)
+)
+
+# 2. 預測機率
+grid$pred <- predict(fit_108, newdata = grid, type = "response")
+
+# 3. 讀台灣界線 shapefile (EPSG:4326)
+tw <- st_read("path/to/TOWN.shp") |> 
+  st_transform(4326)
+
+# 4. 畫圖
+ggplot() +
+  geom_sf(data = tw, fill = NA, color = "black") +
+  geom_raster(data = grid, aes(x = lon, y = lat, fill = pred), alpha = 0.6) +
+  geom_contour(data = grid, aes(x = lon, y = lat, z = pred), color = "red") +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = range(df_108$lon), ylim = range(df_108$lat))
+
+Zmodel_109_step <- step(Zmodel_109, direction = "both", trace = TRUE)
+
+summary(Zmodel_109_step)
+
 exp(coef(model_109))
-num_vars <- c("education_cd","move_cnt","child_cnt","floor_group_cd","b_area","b_age")  
-cat_vars <- c("gender_cd","marriage_cd","living_type_cd","household_type_cd","new_disability_category",
-              "is_living_same_county","having_house_type_cd","purpose_group_cd","materials_group_cd")
-names(peogeogower)
-res <- FAMD(peo_no_na, ncp = 18, graph = FALSE)
-fviz_famd_var(res, repel = TRUE)              
-fviz_contrib(res, "var", axes = 1)            
-fviz_contrib(res, "var", axes = 2) 
-fviz_contrib(res, "var", axes = 3) 
-res$eig
 
-famd_coords_108 <- as.data.frame(res108$ind$coord)
-famd_coords_109 <- as.data.frame(res109$ind$coord)
-famd_coords_110 <- as.data.frame(res110$ind$coord)
-famd_coords_111 <- as.data.frame(res111$ind$coord)
-famd_coords_112 <- as.data.frame(res112$ind$coord)
-model_data108 <- cbind(y = df_108$is_in_active_fault, famd_coords_108)
-model_data109 <- cbind(y = df_109$is_in_active_fault, famd_coords_109)
-model_data110 <- cbind(y = df_110$is_in_active_fault, famd_coords_110)
-model_data111 <- cbind(y = df_111$is_in_active_fault, famd_coords_111)
-model_data112 <- cbind(y = df_112$is_in_active_fault, famd_coords_112)
-
-model_108 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data108, 
-                 family = binomial(link = "logit"))
-summary(model_108)
-exp(coef(model_108))
-res108$eig
-fviz_contrib(res108, "var", axes = 1)            
-fviz_contrib(res108, "var", axes = 2) 
-fviz_contrib(res108, "var", axes = 3) 
-
-model_109 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data109, 
-                 family = binomial(link = "logit"))
-summary(model_109)
-exp(coef(model_109))
-res109$eig
-fviz_contrib(res109, "var", axes = 1)            
-fviz_contrib(res109, "var", axes = 2) 
-fviz_contrib(res109, "var", axes = 3) 
-
-model_110 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data110, 
-                 family = binomial(link = "logit"))
-model_111 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data111, 
-                 family = binomial(link = "logit"))
-model_112 <- glm(y ~ Dim.1 + Dim.2 + Dim.3, data = model_data112, 
-                 family = binomial(link = "logit"))
-summary(model)
-exp(coef(model))
 
 fwrite(peogeogower,"F:/淡江/資料科學漫步/內政部/data108.csv")
+
+
+shp_raw <- st_read("F:/淡江/資料科學漫步/資料科學漫步/村(里)界(TWD97經緯度)/VILLAGE_NLSC_1140620.shp")
+if (is.na(st_crs(shp_raw))) st_crs(shp_raw) <- 3824 
+
+sf_use_s2(FALSE)
+
+shp1 <- shp_raw |>
+  sf::st_make_valid() |>
+  st_collection_extract("POLYGON") 
+
+# 依 shp 順序對齊資料（很重要）
+shp <- shp1 |>
+  st_transform(3826) |>
+  st_set_precision(1) |>
+  st_buffer(0) |>
+  st_make_valid()
+
+nb_topo <- poly2nb(shp, queen = TRUE, snap = 80)  # 30 不夠就試 50、公尺
+spdep::n.comp.nb(nb_topo)$nc                      # 看子圖數
+card0_idx <- which(card(nb_topo) == 0)            # 零鄰居索引
+length(card0_idx)
+
+cent <- st_coordinates(st_centroid(shp))
+nb_knn1 <- knn2nb(knearneigh(cent, k = 1))
+nb <- spdep::union.nb(nb_topo, nb_knn1)
+spdep::n.comp.nb(nb)$nc 
+
+# ── 3) BYM（Binomial） ───────────────────────────────────────────────
+set.seed(42)
+fit_bym <- S.CARbym(
+  formula = cbind(y, trials - y) ~ fault01 + dip01 + subsidence_ord,
+  family  = "binomial",
+  W       = W,
+  burnin  = 20000, n.sample = 80000, thin = 60,   # 可視情況調整
+  prior.mean.beta = rep(0, 3 + 1),
+  prior.var.beta  = rep(1000, 3 + 1),
+  verbose = TRUE
+)
+summary(fit_bym)
+
+# 固定效應（log-odds）轉成勝算比
+exp(cbind(Estimate = fit_bym$summaries$fixed[,"mean"]))
+
+# ── 4) 匯出後驗結果到地圖 ────────────────────────────────────────────
+shp$u_struct  <- fit_bym$summaries$random$phi[,"mean"]      # 空間結構化
+shp$v_unstruct<- fit_bym$summaries$random$theta[,"mean"]    # 非結構化
+shp$linpred   <- fit_bym$fitted.values                       # 後驗線性預測
+shp$p_hat     <- plogis(shp$linpred)                         # 後驗機率
+
+# 簡單畫圖：空間結構化效應
+ggplot(shp) +
+  geom_sf(aes(fill = u_struct), color = NA) +
+  scale_fill_viridis_c() +
+  labs(title = "BYM：空間結構化隨機效應 (u_i)") +
+  theme_void()
+
+# ── 5) 殘差空間自相關檢查（Pearson 殘差） ───────────────────────────
+res_pear <- (dat$y - shp$p_hat * dat$trials) / sqrt(shp$p_hat*(1-shp$p_hat)*dat$trials)
+moran.mc(res_pear, listw = nb2listw(nb, style="W", zero.policy=TRUE), nsim=999)
+
 

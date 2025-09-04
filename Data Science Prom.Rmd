@@ -4,119 +4,320 @@ author: "Jundian"
 date: "2025-08-14"
 output: html_document
 ---
-# Main
+
+# Check
 ```{r}
-library(dplyr)
+library(readr)
 
-# 年份列表
-years <- 108:112
+moi_people_house_dtl_simulation_110 <- read_csv("moi_people_house_dtl_simulation_110.csv")
+#View(moi_people_house_dtl_simulation_110)
+moi_people_house_dtl_simulation_111 <- read_csv("moi_people_house_dtl_simulation_111.csv")
+#View(moi_people_house_dtl_simulation_111)
+```
 
-# 讀取並統一欄位名稱 + 新增年份欄位
-all_data <- lapply(years, function(y) {
-  file_name <- paste0("moi_people_house_dtl_simulation_", y, ".csv")
-  df <- read.csv(file_name)
-  
-  # 欄位名稱統一
-  if ("new_disability_category" %in% colnames(df)) {
-    colnames(df)[colnames(df) == "new_disability_category"] <- "disability_lv"
+# 整理資跳跑迴歸
+```{r, message=FALSE, warning=FALSE}
+# ---- 套件 ----
+library(data.table)
+library(speedglm)
+
+# ---- 參數 ----
+years    <- 108:112
+vars     <- c("b_age", "gender_cd", "education_cd", "marriage_cd",
+              "child_cnt", "having_house_type_cd")
+outcomes <- c("is_in_active_fault", "is_in_lique_binary", "is_in_dip_slope")
+
+# ---- 讀檔與欄位/型別修正 ----
+read_and_fix <- function(file) {
+  dt <- fread(file, na.strings = c("", "NA"))
+  needed <- c(outcomes, vars)
+  missing_cols <- setdiff(needed, names(dt))
+  if (length(missing_cols)) dt[, (missing_cols) := NA]
+
+  # 二元化
+  if ("is_in_lique_faction" %in% names(dt)) {
+    dt[, is_in_lique_binary := fifelse(
+      is_in_lique_faction %in% c("1","2","3",1,2,3), 1L,
+      fifelse(is_in_lique_faction %in% c("0",0), 0L, NA_integer_)
+    )]
   }
-  
-  # 新增年份欄位並移到第一個
-  df <- df %>%
-    mutate(years = y) %>%
-    relocate(years, .before = 1)
-  
-  df
-}) %>%
-  bind_rows()
+  for (col in c("is_in_active_fault", "is_in_dip_slope")) {
+    if (col %in% names(dt)) {
+      dt[, (col) := fifelse(get(col) %in% c("1",1L), 1L,
+                            fifelse(get(col) %in% c("0",0L), 0L, NA_integer_))]
+    }
+  }
 
-# 檢查
-head(all_data)
+  # 數字型轉換
+  for (v in c("b_age","child_cnt")) if (v %in% names(dt))
+    dt[, (v) := suppressWarnings(as.numeric(get(v)))]
+
+  # 性別
+  if ("gender_cd" %in% names(dt)) {
+    dt[, gender_cd := factor(
+      fifelse(gender_cd %in% c("1",1), "男生",
+      fifelse(gender_cd %in% c("2",2), "女生", as.character(gender_cd))),
+      levels = c("男生", "女生")
+    )]
+  }
+  # 教育
+  if ("education_cd" %in% names(dt)) {
+    dt[, education_cd := factor(
+      fifelse(education_cd %in% c("1",1),"國中以下",
+      fifelse(education_cd %in% c("2",2),"高中職",
+      fifelse(education_cd %in% c("3",3),"專科(含二專、三專、五專)",
+      fifelse(education_cd %in% c("4",4),"大學",
+      fifelse(education_cd %in% c("5",5),"碩博士",
+      fifelse(education_cd %in% c("6",6),"不詳及NULL",as.character(education_cd))))))),
+      levels=c("國中以下","高中職","專科(含二專、三專、五專)","大學","碩博士","不詳及NULL")
+    )]
+  }
+  # 婚姻
+  if ("marriage_cd" %in% names(dt)) {
+    dt[, marriage_cd := factor(
+      fifelse(marriage_cd %in% c("1",1),"未婚",
+      fifelse(marriage_cd %in% c("2",2),"有偶",
+      fifelse(marriage_cd %in% c("3",3),"離婚",
+      fifelse(marriage_cd %in% c("4",4),"喪偶",
+      fifelse(marriage_cd %in% c("5",5),"婚姻關係消滅",as.character(marriage_cd)))))),
+      levels=c("未婚","有偶","離婚","喪偶","婚姻關係消滅")
+    )]
+  }
+  # 房屋
+  if ("having_house_type_cd" %in% names(dt)) {
+    dt[, having_house_type_cd := factor(
+      fifelse(having_house_type_cd=="A","標準有殼(本人有殼)",
+      fifelse(having_house_type_cd=="B","標準無殼(本人無殼)",
+      fifelse(having_house_type_cd=="C1","成年子女/其他人士(住宅為本戶所有)",
+      fifelse(having_house_type_cd=="C2","成年子女/其他人士(住宅不為本戶所有)",
+      fifelse(having_house_type_cd=="D1","配偶父母未成年子女(住宅為本戶所有)",
+      fifelse(having_house_type_cd=="D2","配偶父母未成年子女(住宅不為本戶所有)",
+      fifelse(having_house_type_cd=="E","持有房屋不在戶籍同縣市(住宅不為本戶所有)",
+      fifelse(having_house_type_cd=="F","持有房屋在戶籍同縣市(住宅不為本戶所有)",
+      fifelse(having_house_type_cd=="99","無法分類",as.character(having_house_type_cd)))))))))),
+      levels=c("標準有殼(本人有殼)","標準無殼(本人無殼)",
+               "成年子女/其他人士(住宅為本戶所有)","成年子女/其他人士(住宅不為本戶所有)",
+               "配偶父母未成年子女(住宅為本戶所有)","配偶父母未成年子女(住宅不為本戶所有)",
+               "持有房屋不在戶籍同縣市(住宅不為本戶所有)","持有房屋在戶籍同縣市(住宅不為本戶所有)","無法分類")
+    )]
+  }
+  return(dt)
+}
+
+# ---- Logistic回歸 ----
+run_logit <- function(dt,outcome,predictors,year){
+  cat(sprintf("\n--- 分析 %s (%d年) ---\n",outcome,year))
+  if(!(outcome %in% names(dt))) return(NULL)
+  work <- dt[!is.na(get(outcome)) & get(outcome) %in% c(0L,1L)]
+  if (!nrow(work)) return(NULL)
+  
+  # 清理 predictor
+  preds <- predictors
+  for(v in predictors){
+    if(!(v %in% names(work))) { preds <- setdiff(preds, v); next }
+    if(mean(is.na(work[[v]])) >= 0.95) { preds <- setdiff(preds, v); next }
+    if(is.factor(work[[v]])){
+      work[[v]] <- droplevels(work[[v]])
+      if(nlevels(work[[v]]) < 2) preds <- setdiff(preds, v)
+    } else {
+      if(length(unique(na.omit(work[[v]]))) < 2) preds <- setdiff(preds, v)
+    }
+  }
+  if(!length(preds)) return(NULL)
+  
+  f <- as.formula(paste(outcome,"~",paste(preds,collapse="+")))
+  fit <- speedglm(f, data=work, family=binomial())
+  coefs <- summary(fit)$coefficients
+  
+  # 結果
+  res <- data.table(
+    term = rownames(coefs),
+    estimate = exp(coefs[,1]),
+    conf.low = exp(coefs[,1] - 1.96*coefs[,2]),
+    conf.high = exp(coefs[,1] + 1.96*coefs[,2]),
+    p.value = 2*(1-pnorm(abs(coefs[,1]/coefs[,2])))
+  )
+  
+  # baseline
+  base_rows <- list()
+  for(v in preds) if(is.factor(work[[v]])){
+    lv <- levels(work[[v]])
+    base_rows[[length(base_rows)+1]] <- data.table(
+      term = paste0(v, lv[1]), estimate=1, conf.low=1, conf.high=1, p.value=NA_real_
+    )
+  }
+  if(length(base_rows)) res <- rbind(res, rbindlist(base_rows), fill=TRUE)
+  
+  # 處理 Inf/NaN
+  num_cols <- c("estimate","conf.low","conf.high")
+  for(c in num_cols) res[, (c) := as.numeric(get(c))]
+  res[is.infinite(estimate), c("estimate","conf.low","conf.high") := NA]
+  
+  # 四位小數
+  for(c in num_cols) res[, (c) := sprintf("%.4f", get(c))]
+  res[, p.value := fifelse(is.na(p.value), NA_character_,
+                           fifelse(p.value < 0.0001, "<0.0001", sprintf("%.4f", p.value)))]
+  
+  return(res)
+}
+
+# ---- 主程式 ----
+all_results <- list()
+for(y in years){
+  file <- paste0("moi_people_house_dtl_simulation_", y, ".csv")
+  if(!file.exists(file)){cat(file, "不存在\n"); next}
+  dt <- read_and_fix(file)
+  year_results <- list()
+  for(o in outcomes){
+    r <- run_logit(dt, o, vars, y)
+    if(!is.null(r)){ r[, outcome := o]; year_results[[o]] <- r }
+  }
+  if(length(year_results)){
+    yr <- rbindlist(year_results, fill=TRUE, use.names=TRUE)[, year := as.character(y)]
+    setcolorder(yr, c("year","outcome",setdiff(names(yr),c("year","outcome"))))
+    all_results[[as.character(y)]] <- yr
+  }
+}
+
+if(length(all_results)){
+  final_results <- rbindlist(all_results, fill=TRUE, use.names=TRUE)
+  print(final_results)
+} else {
+  cat("沒有成功處理任何資料\n")
+}
+
 
 ```
 
-# Test
+# 畫圖 by Claude
 ```{r}
-library(dplyr)
-library(broom)   # 整理模型輸出
+# ---- 視覺化套件 ----
+library(ggplot2)
+library(data.table)
+library(scales)
 
-# -----------------------------
-# 1. 清理三個風險變數
-# -----------------------------
-all_data <- all_data %>%
-  mutate(
-    # 斷層帶：0=非斷層, 1=在斷層, 2=NA
-    is_in_active_fault = case_when(
-      is_in_active_fault == "1" ~ 1,
-      is_in_active_fault == "0" ~ 0,
-      TRUE ~ NA_real_
-    ),
-    
-    # 液化區 (二元化)：0=非液化, 1=液化 (低/中/高), 4=NA
-    is_in_lique_binary = case_when(
-      is_in_lique_faction %in% c("1","2","3") ~ 1,
-      is_in_lique_faction == "0" ~ 0,
-      TRUE ~ NA_real_
-    ),
-    
-    # 液化區 (等級化)：0=非液化, 1=低, 2=中, 3=高, 4=NA
-    is_in_lique_level = case_when(
-      is_in_lique_faction %in% c("0","1","2","3") ~ as.numeric(is_in_lique_faction),
-      TRUE ~ NA_real_
-    ),
-    
-    # 順逆向坡：0=非, 1=是, 2=NA
-    is_in_dip_slope = case_when(
-      is_in_dip_slope == "1" ~ 1,
-      is_in_dip_slope == "0" ~ 0,
-      TRUE ~ NA_real_
-    )
-  )
-
-# -----------------------------
-# 2. 選擇自變數
-# -----------------------------
-vars <- c("b_age", "gender_cd", "education_cd", 
-          "marriage_cd", "child_cnt", "having_house_type_cd")
-
-# -----------------------------
-# 3. 定義一個函數，跑 logistic regression 並輸出 OR
-# -----------------------------
-run_logit <- function(data, outcome, predictors) {
-  fml <- as.formula(paste(outcome, "~", paste(predictors, collapse = " + ")))
-  model <- glm(fml, data = data, family = binomial)
-  tidy(model, exponentiate = TRUE, conf.int = TRUE) %>%
-    mutate(outcome = outcome)
+# ---- 資料準備函數 ----
+prepare_vis_data <- function(results) {
+  vis_data <- results[!is.na(p.value) & p.value != "NA" & !grepl("Intercept", term)]
+  for (col in c("estimate", "conf.low", "conf.high")) {
+    vis_data[, (col) := as.numeric(get(col))]
+  }
+  vis_data[, p_numeric := fifelse(p.value == "<0.0001", 0.0001, as.numeric(p.value))]
+  vis_data[, significance := fifelse(
+    p_numeric < 0.001, "高度顯著 (p<0.001)",
+    fifelse(p_numeric < 0.01, "中度顯著 (p<0.01)", 
+    fifelse(p_numeric < 0.05, "顯著 (p<0.05)", "不顯著 (p≥0.05)"))
+  )]
+  vis_data[, risk_direction := fifelse(estimate > 1, "增加風險", "降低風險")]
+  return(vis_data)
 }
 
-# -----------------------------
+# ---- 圖表1: 森林圖 ----
+create_odds_ratio_forest_by_year <- function(vis_data, save_plot = FALSE) {
+  all_years <- unique(vis_data$year)
+  plot_list <- list()
+  for (year_val in all_years) {
+    year_data <- vis_data[year == year_val]
+    forest_data <- year_data[estimate > 0.1 & estimate < 10 & 
+                             conf.low > 0.01 & conf.high < 100]
+    forest_data[, short_term := gsub("gender_cd|education_cd|marriage_cd|having_house_type_cd", "", term)]
+    forest_data[, short_term := substr(short_term, 1, 20)]
+    title_text <- paste0("勝算比森林圖-", year_val, "年")
+    file_name <- gsub("[^A-Za-z0-9一-龥]", "_", title_text)
+    
+    p <- ggplot(forest_data, aes(x = reorder(short_term, estimate), y = estimate, color = outcome)) +
+      geom_point(size = 2.5, position = position_dodge(width = 0.6)) +
+      geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                    width = 0.3, position = position_dodge(width = 0.6)) +
+      geom_hline(yintercept = 1, linetype = "dashed", color = "red", alpha = 0.7) +
+      scale_y_log10(labels = number_format(accuracy = 0.01), breaks = c(0.1, 0.2, 0.5, 1, 2, 5, 10)) +
+      coord_flip() +
+      labs(title = title_text, subtitle = "點估計及95%信賴區間，紅線為OR=1", x = "變數", y = "勝算比 (OR)", color = "結果變數") +
+      theme_minimal(base_size = 12) +
+      theme(legend.position = "bottom", axis.text.y = element_text(size = 7))
+    
+    if (save_plot) {
+      ggsave(paste0(file_name, ".png"), plot = p, bg = "white", width = 12, height = 8, dpi = 300)
+    }
+    plot_list[[as.character(year_val)]] <- p
+  }
+  return(plot_list)
+}
 
-# 4. 分別跑三個模型
-# -----------------------------
-results <- bind_rows(
-  run_logit(all_data, "is_in_active_fault", vars),
-  run_logit(all_data, "is_in_lique_binary", vars),
-  run_logit(all_data, "is_in_dip_slope", vars)
-)
+# ---- 圖表2: 熱力圖 ----
+create_significance_heatmap <- function(vis_data, save_plot = FALSE) {
+  heatmap_data <- copy(vis_data)
+  heatmap_data[, short_term := gsub("gender_cd|education_cd|marriage_cd|having_house_type_cd", "", term)]
+  heatmap_data[, short_term := substr(short_term, 1, 15)]
+  heatmap_data[, sig_factor := factor(significance,
+    levels = c("不顯著 (p≥0.05)", "顯著 (p<0.05)", "中度顯著 (p<0.01)", "高度顯著 (p<0.001)"),
+    ordered = TRUE)]
+  title_text <- "統計顯著性熱力圖"
+  file_name <- gsub("[^A-Za-z0-9一-龥]", "_", title_text)
+  
+  p <- ggplot(heatmap_data, aes(x = year, y = reorder(short_term, p_numeric), fill = sig_factor)) +
+    geom_tile(color = "white", size = 0.5) +
+    scale_fill_manual(values = c("不顯著 (p≥0.05)" = "#e0f3f8",
+                                 "顯著 (p<0.05)" = "#fee08b", 
+                                 "中度顯著 (p<0.01)" = "#fc8d59",
+                                 "高度顯著 (p<0.001)" = "#d73027")) +
+    facet_wrap(~outcome, scales = "free_y") +
+    labs(title = title_text, subtitle = "顏色越紅顯著性越強", x = "年份", y = "變數", fill = "顯著性水準") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 7),
+          strip.text = element_text(size = 10, face = "bold"),
+          legend.position = "bottom")
+  
+  if (save_plot) {
+    ggsave(paste0(file_name, ".png"), plot = p, bg = "white", width = 14, height = 10, dpi = 300)
+  }
+  return(p)
+}
 
-# -----------------------------
-# 5. 檢視結果 (Odds Ratios)
-# outcome → 哪個風險變數 (斷層 / 液化 / 坡地)
-# term → 自變數名稱
-# estimate → OR (Odds Ratio)
-# conf.low, conf.high → 95% 信賴區間
-# p.value → 顯著性檢定
+# ---- 圖表3: 風險摘要 ----
+create_risk_summary <- function(vis_data, save_plot = FALSE) {
+  risk_summary <- vis_data[, .(
+    total_vars = .N,
+    increase_risk = sum(estimate > 1 & p_numeric < 0.05, na.rm = TRUE),
+    decrease_risk = sum(estimate < 1 & p_numeric < 0.05, na.rm = TRUE),
+    no_effect = sum(p_numeric >= 0.05, na.rm = TRUE)
+  ), by = .(year, outcome)]
+  
+  risk_long <- melt(risk_summary, id.vars = c("year", "outcome"),
+                    measure.vars = c("increase_risk", "decrease_risk", "no_effect"),
+                    variable.name = "effect_type", value.name = "count")
+  
+  risk_long[, effect_type := factor(effect_type,
+    levels = c("no_effect", "decrease_risk", "increase_risk"),
+    labels = c("無顯著效應", "降低風險", "增加風險"))]
+  
+  title_text <- "風險效應變數統計"
+  file_name <- gsub("[^A-Za-z0-9一-龥]", "_", title_text)
+  
+  p <- ggplot(risk_long, aes(x = year, y = count, fill = effect_type)) +
+    geom_col(position = "stack", width = 0.7) +
+    scale_fill_manual(values = c("無顯著效應" = "#e0f3f8",
+                                 "降低風險" = "#91cf60", 
+                                 "增加風險" = "#fc8d59")) +
+    facet_wrap(~outcome) +
+    labs(title = title_text, subtitle = "各年份顯著變數的風險方向分佈", x = "年份", y = "變數數量", fill = "效應類型") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "bottom", strip.text = element_text(size = 10, face = "bold")) +
+    guides(fill = guide_legend(ncol = 3))
+  
+  if (save_plot) {
+    ggsave(paste0(file_name, ".png"), plot = p, bg = "white", width = 12, height = 8, dpi = 300)
+  }
+  return(p)
+}
 
-# Ex:
-# If education_cd高中以上 的 OR = 0.7 (p < 0.01)，代表高學歷者住在風險區的勝算 少 30%。
-# If having_house_type_cd=自有 的 OR = 1.5 (p < 0.05)，代表有房者住在風險區的勝算 高 50%。
-# If b_age 的 OR = 1.02，代表年齡每增加 1 歲，住在風險區的勝算增加 2%。
-# -----------------------------
-results %>%
-  select(outcome, term, estimate, conf.low, conf.high, p.value) %>%
-  arrange(outcome, term) %>% 
-  mutate(p.value = round(p.value, 3))
-
+# ---- 執行 ----
+vis_data <- prepare_vis_data(final_results)
+forest_plots <- create_odds_ratio_forest_by_year(vis_data, save_plot = TRUE)
+heatmap_plot <- create_significance_heatmap(vis_data, save_plot = TRUE)
+summary_plot <- create_risk_summary(vis_data, save_plot = TRUE)
 
 ```
 
